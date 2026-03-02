@@ -55,7 +55,7 @@ buoy_types:
         max_jump: 1.0             # Max interface movement per hour (sensors/hr). ~2 cm/hr at 2 cm spacing.
         upper_temp_limit: 0.0     # Max realistic surface temperature (C)
         abs_max_temp: 30.0        # Hardware error threshold (Max)
-        abs_min_temp: -65.0       # Hardware error threshold (Min)
+        abs_min_temp: -50.0       # Hardware error threshold (Min)
         ocean_max_temp: -1.0      # Antarctic ocean should be < -1.0C
 
     geometry:
@@ -95,7 +95,7 @@ buoy_types:
         max_jump: 1.0             # Max interface movement per hour (sensors/hr). ~2 cm/hr at 2 cm spacing.
         upper_temp_limit: 0.0     # Max realistic surface temperature (C)
         abs_max_temp: 30.0        # Hardware error threshold (Max)
-        abs_min_temp: -65.0       # Hardware error threshold (Min)
+        abs_min_temp: -50.0       # Hardware error threshold (Min)
         ocean_max_temp: -1.0      # Antarctic ocean should be < -1.0C
 
   # --- Snow Buoys ---
@@ -119,7 +119,7 @@ buoy_types:
       enabled: true
       params:
         # Extreme unphysical limits (Flag 2)
-        min_temp_limit: -70.0
+        min_temp_limit: -50.0
         max_temp_limit: 25.0
         max_hourly_jump: 10.0
 
@@ -150,7 +150,7 @@ buoy_types:
     qc:
       enabled: true
       params:
-        min_temp_limit: -70.0         # Hardware error lower limit (°C)
+        min_temp_limit: -50.0         # Hardware error lower limit (°C)
         max_temp_limit: 25.0          # Hardware error upper limit (°C)
         max_hourly_jump: 10.0         # Max temperature change per hour (°C/hr)
 
