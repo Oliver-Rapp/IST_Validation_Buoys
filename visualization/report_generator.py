@@ -323,7 +323,7 @@ def _scatter_map_page(pdf: PdfPages, data: pd.DataFrame, hemisphere: str) -> Non
         ax.scatter(
             sub["LON"].values, sub["LAT"].values,
             s=1, alpha=0.25, color=color, linewidths=0,
-            transform=ccrs.PlateCarree(), zorder=5,
+            transform=ccrs.PlateCarree(), zorder=5, rasterized=True,
         )
         handles.append(
             plt.scatter([], [], s=20, color=color, alpha=0.8,
@@ -455,6 +455,7 @@ def _temp_timeseries_page(
             alpha=0.7 if is_thermistor else 0.25,
             color=color, linewidths=0,
             zorder=5 if is_thermistor else 3,
+            rasterized=True,
         )
         handles.append(
             plt.scatter([], [], s=30 if is_thermistor else 20,
