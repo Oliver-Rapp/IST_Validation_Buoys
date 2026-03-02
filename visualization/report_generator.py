@@ -230,7 +230,6 @@ def _histogram_page(pdf: PdfPages, data: pd.DataFrame, hemisphere: str) -> None:
         # Year totals (across all types) for annotation
         year_totals = pivot.sum(axis=0)
         grand_total = int(pivot.values.sum())
-
         for i, yr in enumerate(years):
             offset = (i - (n_years - 1) / 2) * width
             vals = pivot[yr].values
@@ -239,10 +238,10 @@ def _histogram_page(pdf: PdfPages, data: pd.DataFrame, hemisphere: str) -> None:
                 color=plt.cm.tab10(i / max(n_years, 1)),
                 label=str(yr), zorder=3,
             )
-            # Value labels on bars that are tall enough
+            # Value labels on all non-zero bars
             for bar in bars:
                 h = bar.get_height()
-                if h > grand_total * 0.003:
+                if h > 0:
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
                         h, f"{int(h):,}", ha="center", va="bottom",
