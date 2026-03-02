@@ -1,0 +1,230 @@
+defaults:
+  output_dir: "./data/validation_output/ist_txt/"
+  output_prefix: "BUOYS_"
+  undef_float: -99.9
+  undef_int: -9
+  undef_dd: -99
+  # --- Temporal and Download Settings ---
+  always_download: true        # If true, it wipes and redownloads on every run
+  start_date: "2024-01-01"     # Default start date (YYYY-MM-DD)
+  end_date: "2026-01-01"       # Default end date (Optional)
+  year_buffer: 3
+  # --- Export Filter ---
+  # Measurements whose QC flag is NOT in this list are replaced with filler values.
+  # A line is omitted entirely only when both Ts and T2m are filtered out.
+  # Flag meanings: -9=No QC/no data, 0=Valid+representative, 1=Valid+non-representative, 2=Invalid
+  export_flags: [-9, 0, 1, 2]   # Export all measurements by default
+
+  # --- AWI Data Source URLs ---
+  awi_urls:
+    Arctic: "https://data.meereisportal.de/data/buoys/processed/Arctic/arctic_buoy_data.zip"
+    Antarctic: "https://data.meereisportal.de/data/buoys/processed/Antarctic/antarctic_buoy_data.zip"
+
+
+buoy_types:
+  # --- SIMB3 (New Thermistor String) ---
+  simb3:
+    match_pattern: "I"              # ID contains 'I' (e.g., 2024I15)
+    station_type: "SIMB3"           # 5-char code for export
+    
+    files:
+      primary: "*TEMP_proc.csv"     # Thermistor data
+      aux: "*AUX_proc.csv"          # GPS, Air Temp, Pressure
+    
+    # Map raw column names to internal standard names
+    columns:
+      lat: "latitude (deg)"         # In AUX
+      lon: "longitude (deg)"        # In AUX
+      air_temp: "temperature_air (degC)" # In AUX
+      pressure: "barometric_pressure (hPa)" # In AUX
+      snow_dist: "snow_distance (m)"     
+    
+    algorithm:
+      method: "leading_edge"
+      params:
+        threshold: 0.4375
+        edge_ratio: 0.2             # Standard ratio
+    
+    air_temp_config:
+      quality_flag: 0               # 0 = Good
+      
+    qc:
+      enabled: true
+      params:
+        threshold_grad: 0.4375    # Liao et al. (2019) physics threshold
+        max_jump: 1.0             # Max interface movement per hour (sensors/hr). ~2 cm/hr at 2 cm spacing.
+        upper_temp_limit: 0.0     # Max realistic surface temperature (C)
+        abs_max_temp: 30.0        # Hardware error threshold (Max)
+        abs_min_temp: -65.0       # Hardware error threshold (Min)
+        ocean_max_temp: -1.0      # Antarctic ocean should be < -1.0C
+
+    geometry:
+      sonar_height_m: 1.5                #uncertain numbers for sonar height.
+      sensor_spacing_m: 0.02              #From The evolution of the seasonal ice mass balance buoy (Planck et al., 2022)
+
+ # --- Legacy SIMBA (T-series) ---
+  legacy_simba:
+    match_pattern: "T"
+    station_type: "SIMBA"
+    
+    files:
+      primary: "*TEMP*raw*.csv"     # Thermistor String. NOTE: matches TEMP_raw+filterflag.csv only.
+                                    # No fallback to TEMP_proc.csv — buoys without a raw+filterflag
+                                    # variant will fail to load.
+      aux: "*TS.csv"                # Time Series file (Air Temp, Pressure)
+    
+    columns:
+      lat: "latitude (deg)"         # Usually in TS file too, but primary works
+      lon: "longitude (deg)"
+      air_temp: "air temperature (degC)"    # <--- NEW: From TS file
+      pressure: "barometric pressure (hPa)" # <--- NEW: From TS file
+    
+    algorithm:
+      method: "leading_edge"
+      params:
+        threshold: 0.4375
+        edge_ratio: 0.2
+    
+    air_temp_config:
+      quality_flag: 0
+      
+    qc:
+      enabled: true
+      params:
+        threshold_grad: 0.4375    # Liao et al. (2019) physics threshold
+        max_jump: 1.0             # Max interface movement per hour (sensors/hr). ~2 cm/hr at 2 cm spacing.
+        upper_temp_limit: 0.0     # Max realistic surface temperature (C)
+        abs_max_temp: 30.0        # Hardware error threshold (Max)
+        abs_min_temp: -65.0       # Hardware error threshold (Min)
+        ocean_max_temp: -1.0      # Antarctic ocean should be < -1.0C
+
+  # --- Snow Buoys ---
+  snow_buoy:
+    match_pattern: "S"
+    station_type: "SNOW "           # Padded to 5 chars
+    
+    files:
+      primary: "*raw+filterflag.csv"
+      
+    columns:
+      lat: "latitude (deg)"
+      lon: "longitude (deg)"
+      air_temp: "temperature_air (degC)"
+      pressure: "barometric_pressure (hPa)"
+      
+    algorithm:
+      method: "none"                # No string processing
+    
+    qc:
+      enabled: true
+      params:
+        # Extreme unphysical limits (Flag 2)
+        min_temp_limit: -70.0
+        max_temp_limit: 25.0
+        max_hourly_jump: 10.0
+
+  # --- Weather Buoys ---
+  weather_buoy:
+    match_pattern: "A"
+    station_type: "METEO"
+
+    files:
+      primary: "*raw+filterflag.csv"
+
+    columns:
+      lat: "latitude (deg)"
+      lon: "longitude (deg)"
+      # Try temperature_air first, fall back to temperature_air_2m or _1m if needed
+      # (different hardware variants use different column names)
+      air_temp: ["temperature_air (degC)", "temperature_air_2m (degC)", "temperature_air_1m (degC)"]
+      pressure: "barometric_pressure (hPa)"
+      wind_speed: "wind_speed (m/s)"
+      wind_dir: "wind_direction (deg)"
+      
+    algorithm:
+      method: "none"
+    
+    air_temp_config:
+      quality_flag: 0
+
+    qc:
+      enabled: true
+      params:
+        min_temp_limit: -70.0         # Hardware error lower limit (°C)
+        max_temp_limit: 25.0          # Hardware error upper limit (°C)
+        max_hourly_jump: 10.0         # Max temperature change per hour (°C/hr)
+
+
+# --- SvalMIZ 2025 Campaign (OpenMetBuoy) ---
+  svalmiz_2025:
+    match_pattern: "2025_KVS"   # Matches the filename
+    station_type: "OMB  "         # OpenMetBuoy (3 chars, padded to 5)
+    file_type: "netcdf_multibuoy"
+    
+    # Path relative to the PARENT_INPUT_DIR provided in the script
+    # Or strict filename matching
+    filename: "2025_KVS_deployment_hourly_MIP.nc"
+    
+    columns:
+      id: "trajectory_id"
+      lat: "latitude"
+      lon: "longitude"
+      ts: "surface_temperature"
+      tair: "air_temperature"
+      
+    algorithm:
+      method: "none"            # Data is already processed (Level 2)
+    
+    qc:
+      enabled: false
+
+# --- CALIB Buoys (C-series) ---
+  calib_buoy:
+    match_pattern: "C"
+    station_type: "CALIB"         # 5 chars exactly
+    
+    files:
+      primary: "*_proc.csv"       # Based on your sample filename
+      
+    columns:
+      lat: "latitude (deg)"
+      lon: "longitude (deg)"
+      air_temp: "temperature_surface (degC)" # Mapping Surface -> Air Temp
+      pressure: "barometric_pressure (hPa)"
+      
+    algorithm:
+      method: "none"              # No string
+    
+    qc:
+      enabled: true
+      params:
+        # Flag 2 — unphysical hardware values only. No representativeness (Flag 1) checks.
+        min_temp_limit: -50.0
+        max_temp_limit: 20.0
+        max_hourly_jump: 10.0
+
+  # --- SVP Buoys (P-series) ---
+  svp_buoy:
+    match_pattern: "P"
+    station_type: "SVP  "         # Padded to 5 chars
+    
+    files:
+      primary: "*_proc.csv"
+      
+    columns:
+      lat: "latitude (deg)"
+      lon: "longitude (deg)"
+      air_temp: "temperature_surface (degC)"
+      pressure: "barometric_pressure (hPa)"
+      # Note: SVPs typically don't have wind, but your sample doesn't show it either
+      
+    algorithm:
+      method: "none"
+    
+    qc:
+      enabled: true
+      params:
+        # Flag 2 — unphysical hardware values only. No representativeness (Flag 1) checks.
+        min_temp_limit: -50.0
+        max_temp_limit: 20.0
+        max_hourly_jump: 10.0

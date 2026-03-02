@@ -1,0 +1,11 @@
+numpy
+pandas
+scipy
+matplotlib
+cartopy
+shapely
+xarray
+netcdf4
+pyyaml
+requests
+tqdm
