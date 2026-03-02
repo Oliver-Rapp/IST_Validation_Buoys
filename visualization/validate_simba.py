@@ -204,6 +204,23 @@ def collect_all_data(buoy_list, cfg_mgr, edge_ratio, threshold, verbose=True):
                 subset=["our_edge_idx", "Thermistor atm/snow IF"]
             ).copy()
 
+            # Extract our thermistor temperature at the AWI-detected interface
+            # position (using the same -1 convention as our main extraction).
+            # Stored as our_T_at_AWI_pos, this allows _enrich() to decompose
+            # delta_temp into:
+            #   delta_temp_position  = our_Ts[our_idx-1] - our_Ts[AWI_idx-1]
+            #       → temperature change within our own string due to index offset;
+            #         exactly zero when our_edge_idx == AWI index.
+            #   delta_temp_residual  = our_Ts[AWI_idx-1] - AWI_Ts[AWI_idx]
+            #       → residual once position error is removed; includes thermistor
+            #         calibration differences and the systematic 1-sensor convention
+            #         offset (we extract one above the interface, AWI reports at it).
+            if "Thermistor atm/snow IF" in both.columns:
+                t_at_awi = extract_surface_temps(
+                    df_string, both["Thermistor atm/snow IF"]
+                )
+                both["our_T_at_AWI_pos"] = t_at_awi.values
+
             all_both.append(both)
             all_merged.append(merged)
 
@@ -256,6 +273,11 @@ def _enrich(df):
     df["delta_idx"] = df["our_edge_idx"] - df["Thermistor atm/snow IF"]
     df["delta_temp"] = df["our_Ts_degC"] - df["T atm/snow IF [°C]"]
     df["abs_delta_idx"] = df["delta_idx"].abs()
+
+    # Temperature error decomposition (only for all_both_df, which carries our_T_at_AWI_pos)
+    if "our_T_at_AWI_pos" in df.columns:
+        df["delta_temp_position"] = df["our_Ts_degC"] - df["our_T_at_AWI_pos"]
+        df["delta_temp_residual"] = df["our_T_at_AWI_pos"] - df["T atm/snow IF [°C]"]
 
     # Temperature regime bins
     awi_t = df["T atm/snow IF [°C]"]
@@ -680,8 +702,8 @@ def fig01_index_distribution(both_df, max_flag, edge_ratio, outdir, fmt, dpi):
     _savefig(fig, outdir, "fig01_index_distribution", fmt, dpi)
 
 
-def _scatter_panel(ax, panel_data, max_flag, lims):
-    """Draw a single temperature scatter panel; return (bias, std, rmse, r, n)."""
+def _scatter_panel_a(ax, panel_data, max_flag, lims):
+    """Option A: 1:1 + OLS regression + ±1 °C / ±2 °C offset bands."""
     sub = panel_data.dropna(subset=["our_Ts_degC", "T atm/snow IF [°C]"])
     for flag in [2, 1, 0]:  # plot Good on top
         if flag > max_flag:
@@ -693,14 +715,14 @@ def _scatter_panel(ax, panel_data, max_flag, lims):
                    c=FLAG_COLORS[flag], s=8, alpha=0.4, linewidths=0,
                    label=f"{FLAG_LABELS[flag]} (n={len(fsub)})")
 
-    ax.plot(lims, lims, "k--", lw=1, label="1:1")
-    for level, style, color in [("optimal", "-.", "#2ca02c"),
-                                 ("target", ":", "#ff7f0e"),
-                                 ("threshold", "--", "#d62728")]:
-        b = PRODUCT_REQUIREMENTS[level]["bias"]
-        ax.plot(lims, [l + b for l in lims], ls=style, color=color, lw=0.8, alpha=0.6)
-        ax.plot(lims, [l - b for l in lims], ls=style, color=color, lw=0.8, alpha=0.6,
-                label=f"±{level} ({b} K)")
+    ax.plot(lims, lims, "k--", lw=1.2, label="1:1")
+    for delta, ls, color, label in [
+        (1, "-",  "#1f77b4", "±1 °C"),
+        (2, "--", "#ff7f0e", "±2 °C"),
+    ]:
+        ax.plot(lims, [l + delta for l in lims], ls=ls, color=color, lw=0.9, alpha=0.7)
+        ax.plot(lims, [l - delta for l in lims], ls=ls, color=color, lw=0.9, alpha=0.7,
+                label=label)
 
     ax.set_xlim(lims)
     ax.set_ylim(lims)
@@ -709,12 +731,18 @@ def _scatter_panel(ax, panel_data, max_flag, lims):
     if len(fsub) < 3:
         return np.nan, np.nan, np.nan, np.nan, 0
 
-    dt = fsub["our_Ts_degC"] - fsub["T atm/snow IF [°C]"]
-    bias = dt.mean()
-    std = dt.std(ddof=1)
-    rmse = np.sqrt((dt**2).mean())
-    r, _ = scipy_stats.pearsonr(fsub["T atm/snow IF [°C]"].dropna(),
-                                 fsub["our_Ts_degC"].dropna()) if len(fsub) > 2 else (np.nan, None)
+    x = fsub["T atm/snow IF [°C]"].values
+    y = fsub["our_Ts_degC"].values
+    slope, intercept, r_val, _p, _se = scipy_stats.linregress(x, y)
+    x_fit = np.array(lims)
+    ax.plot(x_fit, slope * x_fit + intercept, "r-", lw=1.5, alpha=0.85,
+            label=f"OLS: y={slope:.3f}x{intercept:+.2f}")
+
+    dt = y - x
+    bias = float(np.mean(dt))
+    std = float(np.std(dt, ddof=1))
+    rmse = float(np.sqrt(np.mean(dt**2)))
+
     n_outside = len(sub) - len(sub[
         (sub["T atm/snow IF [°C]"].between(lims[0], lims[1])) &
         (sub["our_Ts_degC"].between(lims[0], lims[1]))
@@ -723,36 +751,82 @@ def _scatter_panel(ax, panel_data, max_flag, lims):
         ax.text(0.96, 0.04, f"({n_outside} pts outside range)",
                 transform=ax.transAxes, ha="right", va="bottom",
                 fontsize=7, color="red", alpha=0.7)
-    return bias, std, rmse, r, len(fsub)
+    return bias, std, rmse, r_val, len(fsub)
 
 
-def fig02_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi):
-    """Temperature scatter: two panels — focus years vs other years."""
+def _scatter_panel_c(ax, panel_data, max_flag, lims):
+    """Option C: 1:1 + mean-bias line + bias ± 1σ / ± 2σ diagonal bands."""
+    sub = panel_data.dropna(subset=["our_Ts_degC", "T atm/snow IF [°C]"])
+    for flag in [2, 1, 0]:  # plot Good on top
+        if flag > max_flag:
+            continue
+        fsub = sub[sub["our_flag"] == flag]
+        if len(fsub) == 0:
+            continue
+        ax.scatter(fsub["T atm/snow IF [°C]"], fsub["our_Ts_degC"],
+                   c=FLAG_COLORS[flag], s=8, alpha=0.4, linewidths=0,
+                   label=f"{FLAG_LABELS[flag]} (n={len(fsub)})")
+
+    ax.plot(lims, lims, "k--", lw=1.2, label="1:1")
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+
+    fsub = sub[sub["our_flag"] <= max_flag]
+    if len(fsub) < 3:
+        return np.nan, np.nan, np.nan, np.nan, 0
+
+    dt = fsub["our_Ts_degC"] - fsub["T atm/snow IF [°C]"]
+    bias = float(dt.mean())
+    std = float(dt.std(ddof=1))
+    rmse = float(np.sqrt((dt**2).mean()))
+    r_val, _ = scipy_stats.pearsonr(
+        fsub["T atm/snow IF [°C]"].values, fsub["our_Ts_degC"].values
+    )
+
+    ax.plot(lims, [l + bias for l in lims], color="#1f77b4", lw=1.5, ls="-",
+            label=f"Mean bias ({bias:+.2f} °C)")
+    for n_sig, ls, color, label in [
+        (1, "-",  "#ff7f0e", "bias ± 1σ"),
+        (2, "--", "#d62728", "bias ± 2σ"),
+    ]:
+        ax.plot(lims, [l + bias + n_sig * std for l in lims],
+                ls=ls, color=color, lw=0.9, alpha=0.75)
+        ax.plot(lims, [l + bias - n_sig * std for l in lims],
+                ls=ls, color=color, lw=0.9, alpha=0.75, label=label)
+
+    n_outside = len(sub) - len(sub[
+        (sub["T atm/snow IF [°C]"].between(lims[0], lims[1])) &
+        (sub["our_Ts_degC"].between(lims[0], lims[1]))
+    ])
+    if n_outside > 0:
+        ax.text(0.96, 0.04, f"({n_outside} pts outside range)",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=7, color="red", alpha=0.7)
+    return bias, std, rmse, r_val, len(fsub)
+
+
+def _fig02_impl(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi,
+                panel_fn, fig_name, subtitle):
+    """Shared layout for fig02 variants; panel_fn draws the reference lines."""
     sub = both_df.dropna(subset=["our_Ts_degC", "T atm/snow IF [°C]"])
     if len(sub) < 5:
-        print("    fig02 skipped — insufficient data")
+        print(f"    {fig_name} skipped — insufficient data")
         return
 
-    # Common axis limits from all data
     all_temps = pd.concat([sub["T atm/snow IF [°C]"], sub["our_Ts_degC"]]).dropna()
     p01, p99 = all_temps.quantile(0.01), all_temps.quantile(0.99)
     lims = [max(p01 - 5, -70), min(p99 + 5, 10)]
 
-    # Split by focus years
     if focus_years and len(focus_years) == 2:
         fy_lo, fy_hi = focus_years[0], focus_years[1]
         mask_focus = sub["year"].between(fy_lo, fy_hi)
         focus_label = f"{fy_lo}–{fy_hi}"
-        other_label = f"Other years (before {fy_lo} or after {fy_hi})"
     else:
         mask_focus = pd.Series(True, index=sub.index)
         focus_label = "All years"
-        other_label = ""
 
     sub_focus = sub[mask_focus]
     sub_other = sub[~mask_focus]
-
-    # Only draw two panels if there is data in both groups
     has_other = len(sub_other) >= 5
 
     if has_other:
@@ -761,7 +835,7 @@ def fig02_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir
         fig, ax1 = plt.subplots(1, 1, figsize=(7, 7))
         ax2 = None
 
-    bias1, std1, rmse1, r1, n1 = _scatter_panel(ax1, sub_focus, max_flag, lims)
+    bias1, std1, rmse1, r1, n1 = panel_fn(ax1, sub_focus, max_flag, lims)
     ax1.set_xlabel("AWI T atm/snow interface (°C)")
     ax1.set_ylabel("Our Ts at edge_idx−1 (°C)")
     ax1.set_title(f"Focus period: {focus_label}")
@@ -778,9 +852,9 @@ def fig02_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
 
     if ax2 is not None:
-        bias2, std2, rmse2, r2, n2 = _scatter_panel(ax2, sub_other, max_flag, lims)
+        bias2, std2, rmse2, r2, n2 = panel_fn(ax2, sub_other, max_flag, lims)
         ax2.set_xlabel("AWI T atm/snow interface (°C)")
-        ax2.set_title(f"Other years")
+        ax2.set_title("Other years")
         ax2.legend(fontsize=7, loc="lower right")
         if not np.isnan(bias2):
             ax2.text(0.04, 0.96,
@@ -793,10 +867,25 @@ def fig02_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir
                      transform=ax2.transAxes, va="top", fontsize=9,
                      bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
 
-    fig.suptitle(f"Interface temperature: ours vs AWI  (edge_ratio = {edge_ratio})",
-                 fontsize=12)
+    fig.suptitle(
+        f"Interface temperature: ours vs AWI  (edge_ratio={edge_ratio}) — {subtitle}",
+        fontsize=12)
     fig.tight_layout()
-    _savefig(fig, outdir, "fig02_temperature_scatter", fmt, dpi)
+    _savefig(fig, outdir, fig_name, fmt, dpi)
+
+
+def fig02a_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi):
+    """Option A: 1:1 + OLS regression + ±1 °C / ±2 °C fixed offset bands."""
+    _fig02_impl(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi,
+                _scatter_panel_a, "fig02a_temperature_scatter",
+                "OLS regression + fixed ±1/2 °C bands")
+
+
+def fig02c_temperature_scatter(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi):
+    """Option C: 1:1 + mean-bias line + bias ± 1σ / ± 2σ empirical bands."""
+    _fig02_impl(both_df, max_flag, edge_ratio, focus_years, outdir, fmt, dpi,
+                _scatter_panel_c, "fig02c_temperature_scatter",
+                "empirical bias ± σ bands")
 
 
 def _seasonal_stats(sub_h, months_all):
@@ -1303,6 +1392,235 @@ def fig08_per_buoy(both_df, max_flag, outdir, fmt, dpi):
 
 
 # ---------------------------------------------------------------------------
+# New figures: separate index-position and temperature evaluations (issue #1)
+# ---------------------------------------------------------------------------
+def fig09_index_scatter(both_df, max_flag, edge_ratio, outdir, fmt, dpi):
+    """
+    Scatter of our detected interface index vs. AWI reference index.
+
+    Complements fig01 (histogram of delta_idx) by showing absolute index
+    values on both axes.  Useful for spotting range-dependent biases (e.g.
+    systematic offset only at deep interfaces) that cancel out in a histogram.
+    Temperature plays NO role in this figure — it is a pure position comparison.
+    """
+    sub = both_df[both_df["our_flag"] <= max_flag].dropna(
+        subset=["our_edge_idx", "Thermistor atm/snow IF"]
+    )
+    if len(sub) < 5:
+        print("    fig09 skipped — insufficient data")
+        return
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    for flag in [2, 1, 0]:
+        if flag > max_flag:
+            continue
+        fsub = sub[sub["our_flag"] == flag]
+        if len(fsub) == 0:
+            continue
+        ax.scatter(
+            fsub["Thermistor atm/snow IF"], fsub["our_edge_idx"],
+            c=FLAG_COLORS[flag], s=8, alpha=0.4, linewidths=0,
+            label=f"{FLAG_LABELS[flag]} (n={len(fsub)})",
+        )
+
+    lo = min(sub["Thermistor atm/snow IF"].min(), sub["our_edge_idx"].min()) - 2
+    hi = max(sub["Thermistor atm/snow IF"].max(), sub["our_edge_idx"].max()) + 2
+    lims = [lo, hi]
+    ax.plot(lims, lims, "k--", lw=1.5, label="1:1")
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+    ax.set_aspect("equal", adjustable="box")
+
+    di = sub["our_edge_idx"] - sub["Thermistor atm/snow IF"]
+    bias = di.mean()
+    std = di.std(ddof=1)
+    rmse = np.sqrt((di**2).mean())
+    ax.text(
+        0.04, 0.96,
+        f"Bias = {bias:+.2f} sensors ({bias * SENSOR_SPACING_CM:+.1f} cm)\n"
+        f"Std  = {std:.2f} sensors ({std * SENSOR_SPACING_CM:.1f} cm)\n"
+        f"RMSE = {rmse:.2f} sensors\n"
+        f"N    = {len(sub):,}",
+        transform=ax.transAxes, va="top", fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+    )
+    ax.set_xlabel("AWI reference interface index (thermistors from top)")
+    ax.set_ylabel("Our detected interface index (thermistors from top)")
+    ax.set_title(
+        f"Interface position: our detection vs. AWI reference\n"
+        f"Index comparison only — temperature plays no role here  "
+        f"(edge_ratio={edge_ratio}, flag≤{max_flag})"
+    )
+    ax.legend(fontsize=8, loc="upper left")
+    fig.tight_layout()
+    _savefig(fig, outdir, "fig09_index_scatter", fmt, dpi)
+
+
+def fig10_temp_decomposition(both_df, max_flag, outdir, fmt, dpi):
+    """
+    Decompose delta_temp into a position-error component and a residual.
+
+    The mixed metric currently reported is:
+        delta_temp = our Ts[our_idx−1] − AWI Ts[AWI_idx]
+
+    This conflates two distinct sources of disagreement.  Here we split it:
+
+        delta_temp_position  =  our Ts[our_idx−1]  −  our Ts[AWI_idx−1]
+            Temperature change within our own thermistor string caused by the
+            index offset alone.  Exactly zero when our_edge_idx == AWI index.
+
+        delta_temp_residual  =  our Ts[AWI_idx−1]  −  AWI Ts[AWI_idx]
+            Residual once the position error is removed.  Combines:
+              • thermistor calibration / data-processing differences between
+                our pipeline and AWI's;
+              • a systematic 1-sensor (~2 cm) convention offset: we extract
+                one sensor above the interface (idx−1) while the AWI column
+                T atm/snow IF [°C] reports at the interface sensor itself.
+
+    By construction:  delta_temp  ≡  delta_temp_position + delta_temp_residual
+
+    Panels A–C show histograms of each component on a shared scale so the
+    contributions can be compared directly.  Panel D shows the position-
+    corrected temperature scatter (contrast with fig02 which mixes both).
+    """
+    required = [
+        "delta_temp", "delta_temp_position", "delta_temp_residual",
+        "our_T_at_AWI_pos", "T atm/snow IF [°C]",
+    ]
+    missing = [c for c in required if c not in both_df.columns]
+    if missing:
+        print(f"    fig10 skipped — columns missing: {missing}")
+        return
+
+    sub = both_df[both_df["our_flag"] <= max_flag].dropna(subset=required)
+    if len(sub) < 5:
+        print("    fig10 skipped — insufficient data after dropna")
+        return
+
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
+    ax_a, ax_b, ax_c, ax_d = axes
+
+    # Shared x limits for A–C so magnitudes can be compared visually
+    all_diffs = pd.concat([
+        sub["delta_temp"], sub["delta_temp_position"], sub["delta_temp_residual"]
+    ]).dropna()
+    x_lo = float(np.percentile(all_diffs, 0.5)) - 1
+    x_hi = float(np.percentile(all_diffs, 99.5)) + 1
+
+    def _hist_panel(ax, values, title, color):
+        n = len(values)
+        bias = float(values.mean())
+        std = float(values.std(ddof=1))
+        rmse = float(np.sqrt((values**2).mean()))
+        bins = np.linspace(x_lo, x_hi, min(80, max(20, n // 10)))
+        bw = bins[1] - bins[0]
+        ax.hist(values, bins=bins, color=color, alpha=0.75, edgecolor="none")
+        ax.axvline(0, color="black", ls="--", lw=1.2, alpha=0.6)
+        ax.axvline(bias, color="navy", ls=":", lw=1.4,
+                   label=f"Mean = {bias:+.2f} °C")
+        x_fit = np.linspace(x_lo, x_hi, 300)
+        y_fit = scipy_stats.norm.pdf(x_fit, bias, std) * n * bw
+        ax.plot(x_fit, y_fit, "k-", lw=1.2, alpha=0.45, label="Normal fit")
+        ax.text(
+            0.97, 0.95,
+            f"Bias = {bias:+.2f} °C\n"
+            f"Std  = {std:.2f} °C\n"
+            f"RMSE = {rmse:.2f} °C\n"
+            f"N    = {n:,}",
+            transform=ax.transAxes, va="top", ha="right", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+        )
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("Temperature difference (°C)")
+        ax.set_ylabel("Count")
+        ax.legend(fontsize=7, loc="upper left")
+
+    _hist_panel(
+        ax_a, sub["delta_temp"],
+        "A — Combined metric (as in fig02)\n"
+        "our Ts[our_idx−1]  −  AWI Ts[AWI_idx]",
+        "#1f77b4",
+    )
+    _hist_panel(
+        ax_b, sub["delta_temp_position"],
+        "B — Position-error component\n"
+        "our Ts[our_idx−1]  −  our Ts[AWI_idx−1]",
+        "#ff7f0e",
+    )
+    _hist_panel(
+        ax_c, sub["delta_temp_residual"],
+        "C — Calibration + convention residual\n"
+        "our Ts[AWI_idx−1]  −  AWI Ts[AWI_idx]",
+        "#2ca02c",
+    )
+
+    # Panel D: position-corrected temperature scatter
+    all_t = pd.concat(
+        [sub["T atm/snow IF [°C]"], sub["our_T_at_AWI_pos"]]
+    ).dropna()
+    p01, p99 = float(all_t.quantile(0.01)), float(all_t.quantile(0.99))
+    lims = [max(p01 - 5, -70), min(p99 + 5, 10)]
+
+    for flag in [2, 1, 0]:
+        if flag > max_flag:
+            continue
+        fsub = sub[sub["our_flag"] == flag]
+        if len(fsub) == 0:
+            continue
+        ax_d.scatter(
+            fsub["T atm/snow IF [°C]"], fsub["our_T_at_AWI_pos"],
+            c=FLAG_COLORS[flag], s=8, alpha=0.4, linewidths=0,
+            label=f"{FLAG_LABELS[flag]} (n={len(fsub)})",
+        )
+
+    ax_d.plot(lims, lims, "k--", lw=1, label="1:1")
+    ax_d.set_xlim(lims)
+    ax_d.set_ylim(lims)
+
+    valid = sub[["our_T_at_AWI_pos", "T atm/snow IF [°C]"]].dropna()
+    if len(valid) >= 3:
+        dt_c = valid["our_T_at_AWI_pos"] - valid["T atm/snow IF [°C]"]
+        bias_c = float(dt_c.mean())
+        std_c = float(dt_c.std(ddof=1))
+        rmse_c = float(np.sqrt((dt_c**2).mean()))
+        r_c, _ = scipy_stats.pearsonr(
+            valid["T atm/snow IF [°C]"], valid["our_T_at_AWI_pos"]
+        )
+        ax_d.text(
+            0.04, 0.96,
+            f"Bias = {bias_c:+.2f} °C\n"
+            f"Std  = {std_c:.2f} °C\n"
+            f"RMSE = {rmse_c:.2f} °C\n"
+            f"R²   = {r_c**2:.3f}\n"
+            f"N    = {len(valid):,}",
+            transform=ax_d.transAxes, va="top", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+        )
+
+    ax_d.set_xlabel("AWI T atm/snow interface (°C)")
+    ax_d.set_ylabel("Our T at AWI position, idx−1 (°C)")
+    ax_d.set_title(
+        "D — Position-corrected scatter (compare fig02)\n"
+        "our Ts[AWI_idx−1]  vs.  AWI Ts[AWI_idx]",
+        fontsize=9,
+    )
+    ax_d.legend(fontsize=7, loc="lower right")
+
+    fig.suptitle(
+        f"Temperature error decomposition  (flag ≤ {max_flag})\n"
+        "A = B + C by construction   |   "
+        "B = temperature change in our string from index offset   |   "
+        "C = residual after correcting for position (calibration + 1-sensor convention)   |   "
+        "D = position-corrected scatter",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    _savefig(fig, outdir, "fig10_temp_decomposition", fmt, dpi)
+
+
+# ---------------------------------------------------------------------------
 # Summary text and run config
 # ---------------------------------------------------------------------------
 def write_summary(vstats, agg, compliance, norm_test, outliers, clean_stats,
@@ -1482,9 +1800,12 @@ def assemble_pdf_report(outdir, vstats, agg, compliance, max_flag, edge_ratio, t
         captions = {
             "fig01": "Figure 1: Distribution of thermistor index differences between our "
                      "automated detection and AWI manual classification.",
-            "fig02": "Figure 2: Scatter plot of surface temperatures split by time period "
-                     "(focus years vs other years). Dashed lines show OSI SAF accuracy "
-                     "requirement bands.",
+            "fig02a": "Figure 2a: Scatter plot of surface temperatures (focus years vs other "
+                      "years). Red line is the OLS regression; blue/orange diagonals are ±1 °C "
+                      "and ±2 °C fixed offset bands.",
+            "fig02c": "Figure 2c: Scatter plot of surface temperatures (focus years vs other "
+                      "years). Blue diagonal is the mean bias; orange/red diagonals are "
+                      "bias ± 1σ and bias ± 2σ empirical bands.",
             "fig03": "Figure 3: Seasonal performance cycle showing monthly bias and "
                      "standard deviation with 95% confidence intervals, split by hemisphere "
                      "(Arctic / Antarctic).",
@@ -1500,6 +1821,23 @@ def assemble_pdf_report(outdir, vstats, agg, compliance, max_flag, edge_ratio, t
                       "and threshold parameter space.",
             "fig08": "Figure 8: Per-buoy performance overview showing bias ± standard "
                      "deviation for each buoy. Colour indicates hemisphere.",
+            "fig09": "Figure 9: Scatter of our detected interface index vs. AWI reference "
+                     "index (thermistors counted from top). The 1:1 line indicates perfect "
+                     "agreement. Temperature plays no role here — this is a pure "
+                     "position/index comparison, complementing the difference histogram "
+                     "in fig01 by showing whether any bias is range-dependent.",
+            "fig10": "Figure 10: Decomposition of the temperature error into two "
+                     "independent components. Panel A repeats the combined metric from "
+                     "fig02 for reference. Panel B (position-error component) shows the "
+                     "temperature change within our own thermistor string caused solely "
+                     "by the index offset; it is exactly zero when our detection agrees "
+                     "with AWI. Panel C (residual) shows what remains once position error "
+                     "is removed: it combines thermistor calibration differences and a "
+                     "systematic 1-sensor (~2 cm) convention offset (we extract one sensor "
+                     "above the interface; the AWI column T atm/snow IF [°C] is at the "
+                     "interface itself). By construction A = B + C. Panel D is the "
+                     "position-corrected scatter — our temperature at the AWI-detected "
+                     "position vs. AWI reference — to be compared directly with fig02.",
         }
 
         for fig_file in figure_files:
@@ -1622,8 +1960,10 @@ def main():
     print("\nGenerating figures ...")
     fig01_index_distribution(all_both_df, max_flag, edge_ratio, outdir,
                              args.format, args.dpi)
-    fig02_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir,
-                              args.format, args.dpi)
+    fig02a_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir,
+                               args.format, args.dpi)
+    fig02c_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir,
+                               args.format, args.dpi)
     fig03_seasonal_cycle(all_both_df, max_flag, outdir, args.format, args.dpi)
     fig04_yearly_trend(all_both_df, max_flag, focus_years, outdir,
                        args.format, args.dpi)
@@ -1633,6 +1973,9 @@ def main():
                                  args.format, args.dpi, edge_ratio,
                                  sweep_1d=args.sweep, sweep_2d=args.sweep_2d)
     fig08_per_buoy(all_both_df, max_flag, outdir, args.format, args.dpi)
+    fig09_index_scatter(all_both_df, max_flag, edge_ratio, outdir,
+                        args.format, args.dpi)
+    fig10_temp_decomposition(all_both_df, max_flag, outdir, args.format, args.dpi)
 
     # --- Summary ---
     write_summary(vstats, agg, compliance, norm_test, outliers, clean_stats,
@@ -1645,12 +1988,15 @@ def main():
     if args.format != "both" and args.format != "png":
         print("  (generating PNG copies for PDF embedding)")
         fig01_index_distribution(all_both_df, max_flag, edge_ratio, outdir, "png", args.dpi)
-        fig02_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir, "png", args.dpi)
+        fig02a_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir, "png", args.dpi)
+        fig02c_temperature_scatter(all_both_df, max_flag, edge_ratio, focus_years, outdir, "png", args.dpi)
         fig03_seasonal_cycle(all_both_df, max_flag, outdir, "png", args.dpi)
         fig04_yearly_trend(all_both_df, max_flag, focus_years, outdir, "png", args.dpi)
         fig05_hemisphere_comparison(all_both_df, max_flag, outdir, "png", args.dpi)
         fig06_temp_regime(all_both_df, max_flag, outdir, "png", args.dpi)
         fig08_per_buoy(all_both_df, max_flag, outdir, "png", args.dpi)
+        fig09_index_scatter(all_both_df, max_flag, edge_ratio, outdir, "png", args.dpi)
+        fig10_temp_decomposition(all_both_df, max_flag, outdir, "png", args.dpi)
 
     assemble_pdf_report(outdir, vstats, agg, compliance, max_flag,
                         edge_ratio, threshold)
