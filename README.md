@@ -3,7 +3,7 @@
 Processes Arctic and Antarctic drifting buoy data into fixed-width ASCII files for validation of the OSI SAF sea ice surface temperature (IST) satellite product.
 
 **Input:** AWI Meereisportal CSV archives (downloaded automatically) and SvalMIZ NetCDF files (provided separately).
-**Output:** SvalMIZ-format ASCII files, one per observation hour, containing skin temperature, air temperature, position, and QC flags for each buoy.
+**Output:** Fixed width format ASCII files, one per observation hour, containing skin temperature, air temperature, position, and QC flags for each buoy.
 
 For full documentation see the [`docs/`](docs/) directory.
 
