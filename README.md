@@ -1,4 +1,4 @@
-# OSI SAF IST Validation Dataset Interfacer
+# OSI SAF IST Validation Dataset
 
 Processes Arctic and Antarctic drifting buoy data into fixed-width ASCII files for validation of the OSI SAF sea ice surface temperature (IST) satellite product.
 
